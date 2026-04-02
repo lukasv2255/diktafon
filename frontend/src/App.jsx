@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Mic, Square, Play, ChevronDown, ChevronUp, Send, Save } from 'lucide-react'
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 
 // Stav aplikace: idle | recording | paused | ended
 const formatTime = (seconds) => {
@@ -88,7 +87,6 @@ export default function App() {
   const [sessionTimer, setSessionTimer] = useState(0)
   const [isProcessing, setIsProcessing] = useState(false)
   const [sessionSummary, setSessionSummary] = useState(null)
-  const [sessionId, setSessionId] = useState(null)
 
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
@@ -124,13 +122,6 @@ export default function App() {
     mediaRecorder.start(1000)
     setTimer(0)
     setAppState('recording')
-
-    // Vytvoř session při prvním startu
-    if (!sessionId) {
-      const res = await fetch(`${BACKEND_URL}/sessions`, { method: 'POST' })
-      const data = await res.json()
-      setSessionId(data.session_id)
-    }
   }
 
   const pauseAndProcess = async () => {
@@ -151,52 +142,55 @@ export default function App() {
     const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
     const formData = new FormData()
     formData.append('audio', blob, 'segment.webm')
-    formData.append('session_id', sessionId)
 
+    let newSegment
     try {
-      const res = await fetch(`${BACKEND_URL}/segments`, {
+      const res = await fetch('/api/segments', {
         method: 'POST',
         body: formData,
       })
       const data = await res.json()
-      setSegments(prev => [...prev, {
-        transcript: data.transcript,
-        summary: data.summary,
-        duration: formatTime(duration),
-      }])
+      newSegment = { transcript: data.transcript, summary: data.summary, duration: formatTime(duration) }
     } catch (err) {
-      // Fallback pro vývoj bez backendu
-      setSegments(prev => [...prev, {
+      newSegment = {
         transcript: '[Backend nedostupný — simulovaný přepis]',
         summary: 'Toto je simulovaná sumarizace segmentu pro účely vývoje frontendu.',
         duration: formatTime(duration),
-      }])
+      }
     }
+    setSegments(prev => [...prev, newSegment])
+    return newSegment
 
     setIsProcessing(false)
   }
 
-  const endSession = async () => {
-    if (appState === 'recording') await pauseAndProcess()
-    setAppState('ended')
-
+  const fetchSummary = async (allSegments) => {
+    const transcripts = allSegments.map(s => s.transcript)
     try {
-      const res = await fetch(`${BACKEND_URL}/sessions/${sessionId}/summary`)
+      const res = await fetch('/api/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcripts }),
+      })
       const data = await res.json()
       setSessionSummary(data.summary)
     } catch {
-      setSessionSummary('Celková sumarizace session bude dostupná po připojení backendu.')
+      setSessionSummary('Sumarizace není dostupná.')
     }
   }
 
-  const requestMidSessionSummary = async () => {
-    try {
-      const res = await fetch(`${BACKEND_URL}/sessions/${sessionId}/summary`)
-      const data = await res.json()
-      setSessionSummary(data.summary)
-    } catch {
-      setSessionSummary('Sumarizace dosavadního průběhu...')
+  const endSession = async () => {
+    let allSegments = [...segments]
+    if (appState === 'recording') {
+      const newSeg = await pauseAndProcess()
+      if (newSeg) allSegments = [...allSegments, newSeg]
     }
+    setAppState('ended')
+    await fetchSummary(allSegments)
+  }
+
+  const requestMidSessionSummary = async () => {
+    await fetchSummary(segments)
   }
 
   const saveSession = () => {
@@ -261,7 +255,6 @@ export default function App() {
     setTimer(0)
     setSessionTimer(0)
     setSessionSummary(null)
-    setSessionId(null)
   }
 
   return (
