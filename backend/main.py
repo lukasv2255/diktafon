@@ -22,6 +22,11 @@ client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 sessions: dict[str, list[dict]] = {}
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.post("/sessions")
 def create_session():
     session_id = str(uuid.uuid4())
@@ -40,7 +45,7 @@ async def process_segment(
     # 1. Přepis přes Whisper
     audio_bytes = await audio.read()
     transcript_response = client.audio.transcriptions.create(
-        model="whisper-1",
+        model="gpt-4o-transcribe",
         file=(audio.filename, audio_bytes, audio.content_type),
         language="cs",
     )
