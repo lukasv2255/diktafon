@@ -89,12 +89,109 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [sessionSummary, setSessionSummary] = useState(null)
   const [sessionId, setSessionId] = useState(null)
+  const [keepAwakeStatus, setKeepAwakeStatus] = useState(null) // 'screen' | 'nosleep' | 'audio' | null
 
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const timerRef = useRef(null)
   const sessionTimerRef = useRef(null)
   const segmentStartRef = useRef(0)
+  const audioCtxRef = useRef(null)
+  const silentNodeRef = useRef(null)
+  const wakeLockRef = useRef(null)
+  const noSleepRef = useRef(null)
+  const noSleepLoadPromiseRef = useRef(null)
+
+  const ensureNoSleepLoaded = async () => {
+    if (window.NoSleep) return window.NoSleep
+    if (!noSleepLoadPromiseRef.current) {
+      noSleepLoadPromiseRef.current = new Promise((resolve, reject) => {
+        const existing = document.querySelector('script[data-nosleep="1"]')
+        if (existing) {
+          existing.addEventListener('load', () => resolve(window.NoSleep))
+          existing.addEventListener('error', reject)
+          return
+        }
+
+        const script = document.createElement('script')
+        script.src = '/nosleep.min.js'
+        script.async = true
+        script.dataset.nosleep = '1'
+        script.onload = () => resolve(window.NoSleep)
+        script.onerror = reject
+        document.head.appendChild(script)
+      })
+    }
+    return noSleepLoadPromiseRef.current
+  }
+
+  const requestWakeLock = async () => {
+    // Pozn.: iOS/Safari běžně zastaví nahrávání, pokud se zařízení zamkne.
+    // Cíl je proto hlavně *zabránit* zamčení obrazovky.
+
+    // 1) Preferuj Screen Wake Lock API (Chrome/Android, některé Safari verze)
+    if (navigator.wakeLock?.request) {
+      try {
+        wakeLockRef.current = await navigator.wakeLock.request('screen')
+        wakeLockRef.current.addEventListener('release', () => {
+          wakeLockRef.current = null
+          setKeepAwakeStatus(null)
+        })
+        setKeepAwakeStatus('screen')
+        return
+      } catch {
+        // Ignoruj a zkus fallback
+      }
+    }
+
+    // 2) Fallback: NoSleep.js (video trick) — často funguje tam, kde audio nepomůže
+    try {
+      const NoSleep = await ensureNoSleepLoaded()
+      if (NoSleep) {
+        if (!noSleepRef.current) noSleepRef.current = new NoSleep()
+        await noSleepRef.current.enable()
+        setKeepAwakeStatus('nosleep')
+        return
+      }
+    } catch {
+      // Ignoruj a zkus další fallback
+    }
+
+    // 3) Fallback: tichý audio loop (některým iOS verzím pomáhá, některým ne)
+    if (audioCtxRef.current) {
+      setKeepAwakeStatus('audio')
+      return
+    }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)()
+    const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate)
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    source.loop = true
+    source.connect(ctx.destination)
+    source.start()
+    audioCtxRef.current = ctx
+    silentNodeRef.current = source
+    setKeepAwakeStatus('audio')
+  }
+
+  const releaseWakeLock = async () => {
+    try {
+      await wakeLockRef.current?.release()
+    } catch {
+      // ignore
+    }
+    wakeLockRef.current = null
+    try {
+      noSleepRef.current?.disable()
+    } catch {
+      // ignore
+    }
+    silentNodeRef.current?.stop()
+    audioCtxRef.current?.close()
+    audioCtxRef.current = null
+    silentNodeRef.current = null
+    setKeepAwakeStatus(null)
+  }
 
   // Timer pro aktuální segment
   useEffect(() => {
@@ -111,6 +208,17 @@ export default function App() {
     }
   }, [appState])
 
+  // Když se tab vrátí do popředí, wake lock je často potřeba získat znovu.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && appState === 'recording') {
+        void requestWakeLock()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  }, [appState])
+
   const startRecording = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
@@ -124,6 +232,7 @@ export default function App() {
     mediaRecorder.start(1000)
     setTimer(0)
     setAppState('recording')
+    await requestWakeLock()
 
     // Vytvoř session při prvním startu
     if (!sessionId) {
@@ -137,6 +246,7 @@ export default function App() {
     if (!mediaRecorderRef.current) return
     setAppState('paused')
 
+    await releaseWakeLock()
     await new Promise((resolve) => {
       mediaRecorderRef.current.onstop = resolve
       mediaRecorderRef.current.stop()
@@ -286,6 +396,15 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-[#ef4444] animate-pulse" />
                 <span className="text-sm text-[#ef4444] font-medium">Nahrávám · {formatTime(timer)}</span>
+                {keepAwakeStatus && (
+                  <span className="text-xs text-[#525252]">
+                    {keepAwakeStatus === 'screen'
+                      ? 'Nezamykám obrazovku'
+                      : keepAwakeStatus === 'nosleep'
+                        ? 'Anti-lock (video)'
+                        : 'Anti-lock (audio)'}
+                  </span>
+                )}
               </div>
             )}
             {appState === 'paused' && (
