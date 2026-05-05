@@ -2,6 +2,10 @@ import { useState, useRef, useEffect } from 'react'
 import { Mic, Square, Play, ChevronDown, ChevronUp, Send, Save } from 'lucide-react'
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
+const API_SECRET = import.meta.env.VITE_API_SECRET || ''
+
+const authHeaders = () =>
+  API_SECRET ? { Authorization: `Bearer ${API_SECRET}` } : {}
 
 // Stav aplikace: idle | recording | paused | ended
 const formatTime = (seconds) => {
@@ -236,7 +240,7 @@ export default function App() {
 
     // Vytvoř session při prvním startu
     if (!sessionId) {
-      const res = await fetch(`${BACKEND_URL}/sessions`, { method: 'POST' })
+      const res = await fetch(`${BACKEND_URL}/sessions`, { method: 'POST', headers: authHeaders() })
       const data = await res.json()
       setSessionId(data.session_id)
     }
@@ -266,6 +270,7 @@ export default function App() {
     try {
       const res = await fetch(`${BACKEND_URL}/segments`, {
         method: 'POST',
+        headers: authHeaders(),
         body: formData,
       })
       const data = await res.json()
@@ -291,7 +296,7 @@ export default function App() {
     setAppState('ended')
 
     try {
-      const res = await fetch(`${BACKEND_URL}/sessions/${sessionId}/summary`)
+      const res = await fetch(`${BACKEND_URL}/sessions/${sessionId}/summary`, { headers: authHeaders() })
       const data = await res.json()
       setSessionSummary(data.summary)
     } catch {
@@ -301,7 +306,7 @@ export default function App() {
 
   const requestMidSessionSummary = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/sessions/${sessionId}/summary`)
+      const res = await fetch(`${BACKEND_URL}/sessions/${sessionId}/summary`, { headers: authHeaders() })
       const data = await res.json()
       setSessionSummary(data.summary)
     } catch {

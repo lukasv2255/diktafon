@@ -1,25 +1,43 @@
 import os
 import uuid
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Security, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import openai
 
 load_dotenv()
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.environ.get("ALLOWED_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
+API_SECRET = os.environ.get("API_SECRET")
+
+security = HTTPBearer(auto_error=False)
+
 # In-memory storage: {session_id: [{"transcript": str, "summary": str}]}
 sessions: dict[str, list[dict]] = {}
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    if not API_SECRET:
+        return  # Auth vypnuta — lokální vývoj bez API_SECRET
+    if not credentials or credentials.credentials != API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/health")
@@ -28,16 +46,20 @@ def health():
 
 
 @app.post("/sessions")
-def create_session():
+@limiter.limit("20/minute")
+def create_session(request: Request, _=Security(verify_token)):
     session_id = str(uuid.uuid4())
     sessions[session_id] = []
     return {"session_id": session_id}
 
 
 @app.post("/segments")
+@limiter.limit("60/minute")
 async def process_segment(
+    request: Request,
     audio: UploadFile = File(...),
     session_id: str = Form(...),
+    _=Security(verify_token),
 ):
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -61,7 +83,8 @@ async def process_segment(
 
 
 @app.get("/sessions/{session_id}/summary")
-def get_session_summary(session_id: str):
+@limiter.limit("30/minute")
+def get_session_summary(session_id: str, request: Request, _=Security(verify_token)):
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
